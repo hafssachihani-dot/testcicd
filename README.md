@@ -1,41 +1,51 @@
-# Documentation - Tests automatises et CI/CD agentique
+# Tests automatises et CI/CD avec LangGraph
 
-Petit livrable inspire de l'exemple du PDF, mais simplifie pour rester facile a comprendre.
-Le projet contient un agent Python, 5 tests pytest, un export JSON du workflow et une pipeline GitHub Actions.
+## Cas d'utilisation
+
+L'agent recoit une question et cherche la reponse dans Wikipedia.
+
+- Si Wikipedia fonctionne, LangGraph route le flux vers `answer`.
+- Si Wikipedia retourne une erreur, LangGraph route le flux vers `dlq`.
+- La DLQ conserve la question en erreur sans faire planter l'agent.
 
 ## Fichiers
 
-- `agent.py` : logique simple de l'agent.
-- `test_agent.py` : suite de 5 tests pytest.
-- `workflow_final.json` : export JSON simplifie du workflow.
-- `requirements.txt` : dependance de test.
-- `.github/workflows/ci-agent.yml` : pipeline CI qui lance les tests a chaque push ou pull request.
+- `agent.py` : workflow LangGraph et appels HTTP.
+- `test_agent.py` : exactement 5 tests pytest.
+- `workflow_final.json` : export simple du workflow.
+- `requirements.txt` : bibliotheques Python.
+- `.github/workflows/ci-agent.yml` : tests automatiques sur GitHub.
 
 ## Lancer les tests
 
-```bash
-python -m pip install pytest
-pytest -q
+```powershell
+py -m pip install -r requirements.txt
+py -m pytest test_agent.py -v
 ```
+
+Si la commande `py` n'existe pas, utiliser `python` a sa place.
+
+## Utilisation de pytest
+
+Le fichier `test_agent.py` importe vraiment `pytest` et utilise :
+
+- `@pytest.fixture` pour creer le mock de la DLQ.
+- `pytest.raises` pour verifier qu'un bug inattendu reste visible.
+- Les instructions `assert` pour verifier les resultats.
 
 ## Mocks utilises
 
-Les tests utilisent `unittest.mock.Mock` pour eviter les dependances lourdes.
+`unittest.mock.Mock` remplace les services externes :
 
-- Le LLM est mocke avec `llm.invoke.return_value`.
-- LangGraph est mocke avec `graph_factory` et `graph`.
-- Le test `test_build_workflow_uses_mocked_langgraph_builder` verifie que le workflow appelle bien :
-  - `add_node`
-  - `set_entry_point`
-  - `set_finish_point`
-  - `compile`
+- `mock_wikipedia` simule une reponse ou une panne de Wikipedia.
+- `mock_dlq` simule le serveur de quarantaine.
 
-Cela permet de tester le comportement attendu sans lancer un vrai serveur LangGraph.
+Les tests n'appellent donc ni Wikipedia, ni une vraie DLQ, ni une API payante.
 
-## Cas testes
+## Les 5 tests
 
-1. Reponse conforme acceptee.
-2. Reponse avec faible confiance bloquee.
-3. Reponse avec phrase interdite bloquee.
-4. Reponse texte simple acceptee.
-5. Construction du workflow avec LangGraph mocke.
+1. Wikipedia repond : l'agent retourne la reponse.
+2. Timeout Wikipedia : la question est envoyee vers la DLQ.
+3. Erreurs reseau parametrees : l'agent affiche un message de secours.
+4. Aucun resultat : la question est envoyee vers la DLQ.
+5. Bug Python inattendu : pytest verifie que l'erreur n'est pas cachee.

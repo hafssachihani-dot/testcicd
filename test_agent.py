@@ -1,67 +1,58 @@
 from unittest.mock import Mock
 
-from agent import build_workflow, make_answer_node
+import pytest
+import requests
+
+from agent import run_agent
 
 
-def test_answer_node_accepts_compliant_response():
-    llm = Mock()
-    llm.invoke.return_value = {
-        "answer": "Paris est la capitale de la France.",
-        "confidence": 0.95,
-    }
-
-    node = make_answer_node(llm)
-    result = node({"question": "Quelle est la capitale de la France ?"})
-
-    assert result["answer"] == "Paris est la capitale de la France."
-    assert result["confidence"] == 0.95
-    assert result["blocked"] is False
+@pytest.fixture
+def mock_dlq():
+    return Mock()
 
 
-def test_answer_node_blocks_low_confidence_response():
-    llm = Mock()
-    llm.invoke.return_value = {"answer": "Peut-etre Paris.", "confidence": 0.4}
+def test_wikipedia_success_returns_answer(mock_dlq):
+    mock_wikipedia = Mock(return_value="Morocco is located in North Africa.")
 
-    node = make_answer_node(llm)
-    result = node({"question": "Quelle est la capitale de la France ?"})
+    result = run_agent("Where is Morocco?", mock_wikipedia, mock_dlq)
 
-    assert result["blocked"] is True
-    assert result["reason"] == "compliance_failed"
-
-
-def test_answer_node_blocks_forbidden_phrase():
-    llm = Mock()
-    llm.invoke.return_value = {"answer": "Je ne sais pas.", "confidence": 0.9}
-
-    node = make_answer_node(llm)
-    result = node({"question": "Question metier critique"})
-
-    assert result["blocked"] is True
-    assert result["answer"] == "Reponse non conforme."
+    assert result["status"] == "SUCCESS"
+    assert "North Africa" in result["answer"]
+    mock_dlq.assert_not_called()
 
 
-def test_answer_node_accepts_simple_string_response():
-    llm = Mock()
-    llm.invoke.return_value = "La commande est valide."
+def test_wikipedia_failure_redirects_to_dlq(mock_dlq):
+    mock_wikipedia = Mock(side_effect=requests.Timeout("API timeout"))
 
-    node = make_answer_node(llm)
-    result = node({"question": "Verifier la commande"})
+    result = run_agent("Where is Morocco?", mock_wikipedia, mock_dlq)
 
-    assert result["answer"] == "La commande est valide."
-    assert result["confidence"] == 1.0
+    assert result["status"] == "FAILED_ROUTED_TO_DLQ"
+    mock_dlq.assert_called_once_with("Where is Morocco?")
 
 
-def test_build_workflow_uses_mocked_langgraph_builder():
-    compiled_app = Mock(name="compiled_app")
-    graph = Mock()
-    graph.compile.return_value = compiled_app
-    graph_factory = Mock(return_value=graph)
-    llm = Mock()
+def test_network_errors_are_handled(mock_dlq):
+    errors = [
+        requests.ConnectionError("API unavailable"),
+        requests.Timeout("API timeout"),
+    ]
 
-    result = build_workflow(graph_factory, llm)
+    for api_error in errors:
+        mock_wikipedia = Mock(side_effect=api_error)
+        result = run_agent("Python language", mock_wikipedia, mock_dlq)
+        assert result["answer"] == "Service Wikipedia indisponible."
 
-    assert result is compiled_app
-    graph.add_node.assert_called_once()
-    graph.set_entry_point.assert_called_once_with("answer")
-    graph.set_finish_point.assert_called_once_with("answer")
-    graph.compile.assert_called_once_with()
+
+def test_empty_wikipedia_result_redirects_to_dlq(mock_dlq):
+    mock_wikipedia = Mock(side_effect=ValueError("Aucun resultat"))
+
+    result = run_agent("Unknown subject", mock_wikipedia, mock_dlq)
+
+    assert result["status"] == "FAILED_ROUTED_TO_DLQ"
+    mock_dlq.assert_called_once()
+
+
+def test_unexpected_programming_error_is_not_hidden(mock_dlq):
+    mock_wikipedia = Mock(side_effect=TypeError("Bug interne"))
+
+    with pytest.raises(TypeError, match="Bug interne"):
+        run_agent("Question", mock_wikipedia, mock_dlq)

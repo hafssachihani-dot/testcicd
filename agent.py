@@ -1,60 +1,91 @@
-from typing import Any, Callable, TypedDict
+from typing import Callable, TypedDict
+
+import requests
+from langgraph.graph import END, START, StateGraph
 
 
 class AgentState(TypedDict, total=False):
     question: str
+    wikipedia_result: str
     answer: str
-    confidence: float
-    blocked: bool
-    reason: str
+    api_failed: bool
+    status: str
 
 
-FORBIDDEN_PHRASES = ("je ne sais pas", "aucune idee", "erreur interne")
-MIN_CONFIDENCE = 0.7
+def search_wikipedia(question: str) -> str:
+    response = requests.get(
+        "https://en.wikipedia.org/w/api.php",
+        params={
+            "action": "query",
+            "list": "search",
+            "srsearch": question,
+            "format": "json",
+        },
+        timeout=10,
+    )
+    response.raise_for_status()
+    results = response.json()["query"]["search"]
+
+    if not results:
+        raise ValueError("Aucun resultat Wikipedia")
+
+    return results[0]["snippet"]
 
 
-def is_response_compliant(response: dict[str, Any]) -> bool:
-    answer = str(response.get("answer", "")).strip().lower()
-    confidence = float(response.get("confidence", 0))
-
-    if not answer:
-        return False
-    if confidence < MIN_CONFIDENCE:
-        return False
-    return not any(phrase in answer for phrase in FORBIDDEN_PHRASES)
+def send_to_dlq(question: str) -> None:
+    requests.post(
+        "http://127.0.0.1:3000/dlq/messages",
+        json={"question": question, "status": "FAILED_ROUTED_TO_DLQ"},
+        timeout=5,
+    )
 
 
-def make_answer_node(llm: Any) -> Callable[[AgentState], AgentState]:
+def build_workflow(
+    wikipedia_tool: Callable[[str], str] = search_wikipedia,
+    dlq_tool: Callable[[str], None] = send_to_dlq,
+):
+    def wikipedia_node(state: AgentState) -> AgentState:
+        try:
+            result = wikipedia_tool(state["question"])
+            return {"wikipedia_result": result, "api_failed": False}
+        except (requests.RequestException, ValueError):
+            return {"api_failed": True}
+
     def answer_node(state: AgentState) -> AgentState:
-        raw_response = llm.invoke(state["question"])
-
-        if isinstance(raw_response, str):
-            response = {"answer": raw_response, "confidence": 1.0}
-        else:
-            response = raw_response
-
-        if not is_response_compliant(response):
-            return {
-                **state,
-                "answer": "Reponse non conforme.",
-                "confidence": 0.0,
-                "blocked": True,
-                "reason": "compliance_failed",
-            }
-
         return {
-            **state,
-            "answer": str(response["answer"]).strip(),
-            "confidence": float(response["confidence"]),
-            "blocked": False,
+            "answer": state["wikipedia_result"],
+            "status": "SUCCESS",
         }
 
-    return answer_node
+    def dlq_node(state: AgentState) -> AgentState:
+        dlq_tool(state["question"])
+        return {
+            "answer": "Service Wikipedia indisponible.",
+            "status": "FAILED_ROUTED_TO_DLQ",
+        }
 
+    def route_after_wikipedia(state: AgentState) -> str:
+        return "dlq" if state["api_failed"] else "answer"
 
-def build_workflow(graph_factory: Callable[[type[AgentState]], Any], llm: Any) -> Any:
-    graph = graph_factory(AgentState)
-    graph.add_node("answer", make_answer_node(llm))
-    graph.set_entry_point("answer")
-    graph.set_finish_point("answer")
+    graph = StateGraph(AgentState)
+    graph.add_node("wikipedia", wikipedia_node)
+    graph.add_node("answer", answer_node)
+    graph.add_node("dlq", dlq_node)
+    graph.add_edge(START, "wikipedia")
+    graph.add_conditional_edges(
+        "wikipedia",
+        route_after_wikipedia,
+        {"answer": "answer", "dlq": "dlq"},
+    )
+    graph.add_edge("answer", END)
+    graph.add_edge("dlq", END)
     return graph.compile()
+
+
+def run_agent(
+    question: str,
+    wikipedia_tool: Callable[[str], str] = search_wikipedia,
+    dlq_tool: Callable[[str], None] = send_to_dlq,
+) -> AgentState:
+    workflow = build_workflow(wikipedia_tool, dlq_tool)
+    return workflow.invoke({"question": question})

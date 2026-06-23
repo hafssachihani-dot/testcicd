@@ -1,1 +1,3 @@
+langgraph
 pytest==8.4.1
+requests
