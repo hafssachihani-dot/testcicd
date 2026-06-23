@@ -1,0 +1,32 @@
+{
+  "name": "simple-langgraph-agent",
+  "description": "Workflow agentique simple avec controle de conformite et mock LangGraph dans les tests.",
+  "nodes": [
+    {
+      "id": "chat_input",
+      "type": "input",
+      "description": "Recoit la question utilisateur."
+    },
+    {
+      "id": "answer",
+      "type": "langgraph_node",
+      "description": "Genere une reponse avec le LLM puis verifie la conformite."
+    },
+    {
+      "id": "blocked_output",
+      "type": "fallback",
+      "description": "Retourne une reponse non conforme si le controle echoue."
+    }
+  ],
+  "edges": [
+    {
+      "from": "chat_input",
+      "to": "answer"
+    },
+    {
+      "from": "answer",
+      "to": "blocked_output",
+      "condition": "confidence < 0.7 or forbidden phrase detected"
+    }
+  ]
+}
