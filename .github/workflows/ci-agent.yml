@@ -27,3 +27,7 @@ jobs:
 
       - name: Execution des 5 tests automatises
         run: pytest test_agent.py -v
+        env:
+          LANGSMITH_TRACING: ${{ secrets.LANGSMITH_API_KEY != '' && 'true' || 'false' }}
+          LANGSMITH_API_KEY: ${{ secrets.LANGSMITH_API_KEY }}
+          LANGSMITH_PROJECT: agent-wikipedia-ci

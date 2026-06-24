@@ -1,4 +1,5 @@
 from typing import Callable, TypedDict
+from uuid import uuid4
 
 import requests
 from langgraph.graph import END, START, StateGraph
@@ -6,6 +7,7 @@ from langgraph.graph import END, START, StateGraph
 
 class AgentState(TypedDict, total=False):
     question: str
+    correlation_id: str
     wikipedia_result: str
     answer: str
     api_failed: bool
@@ -32,17 +34,21 @@ def search_wikipedia(question: str) -> str:
     return results[0]["snippet"]
 
 
-def send_to_dlq(question: str) -> None:
+def send_to_dlq(question: str, correlation_id: str) -> None:
     requests.post(
         "http://127.0.0.1:3000/dlq/messages",
-        json={"question": question, "status": "FAILED_ROUTED_TO_DLQ"},
+        json={
+            "question": question,
+            "correlation_id": correlation_id,
+            "status": "FAILED_ROUTED_TO_DLQ",
+        },
         timeout=5,
     )
 
 
 def build_workflow(
     wikipedia_tool: Callable[[str], str] = search_wikipedia,
-    dlq_tool: Callable[[str], None] = send_to_dlq,
+    dlq_tool: Callable[[str, str], None] = send_to_dlq,
 ):
     def wikipedia_node(state: AgentState) -> AgentState:
         try:
@@ -58,7 +64,7 @@ def build_workflow(
         }
 
     def dlq_node(state: AgentState) -> AgentState:
-        dlq_tool(state["question"])
+        dlq_tool(state["question"], state["correlation_id"])
         return {
             "answer": "Service Wikipedia indisponible.",
             "status": "FAILED_ROUTED_TO_DLQ",
@@ -85,7 +91,21 @@ def build_workflow(
 def run_agent(
     question: str,
     wikipedia_tool: Callable[[str], str] = search_wikipedia,
-    dlq_tool: Callable[[str], None] = send_to_dlq,
+    dlq_tool: Callable[[str, str], None] = send_to_dlq,
+    correlation_id: str | None = None,
 ) -> AgentState:
+    correlation_id = correlation_id or str(uuid4())
     workflow = build_workflow(wikipedia_tool, dlq_tool)
-    return workflow.invoke({"question": question})
+    return workflow.invoke(
+        {
+            "question": question,
+            "correlation_id": correlation_id,
+        },
+        config={
+            "run_name": "wikipedia-agent",
+            "tags": ["wikipedia", "langgraph"],
+            "metadata": {
+                "correlation_id": correlation_id,
+            },
+        },
+    )

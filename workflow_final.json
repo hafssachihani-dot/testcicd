@@ -3,6 +3,7 @@
   "framework": "LangGraph",
   "state": [
     "question",
+    "correlation_id",
     "wikipedia_result",
     "answer",
     "api_failed",
